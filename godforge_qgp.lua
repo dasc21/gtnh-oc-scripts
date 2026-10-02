@@ -255,12 +255,173 @@ local function loadState()
 end
 
 
-local function requiredProxy(address, label)
+local function tryProxy(address)
+  if not address or address == "" then return nil end
   local ok, proxy = pcall(component.proxy, address)
-  if not ok or not proxy then
-    fail(label .. " not found at " .. tostring(address))
+  if ok and proxy then return proxy end
+  return nil
+end
+
+
+local function listMeInterfaces()
+  local result = {}
+
+  for address in component.list("me_interface", true) do
+    local proxy = tryProxy(address)
+    if proxy then
+      local cpuCount = nil
+      local okCpu, cpus = pcall(proxy.getCpus)
+      if okCpu and type(cpus) == "table" then
+        cpuCount = 0
+        for _ in pairs(cpus) do cpuCount = cpuCount + 1 end
+      end
+
+      result[#result + 1] = {
+        address = address,
+        proxy = proxy,
+        cpuCount = cpuCount
+      }
+    end
   end
-  return proxy
+
+  return result
+end
+
+
+local function describeMeInterfaces(list)
+  local parts = {}
+  for _, entry in ipairs(list) do
+    parts[#parts + 1] =
+      entry.address .. " CPUs=" .. tostring(entry.cpuCount)
+  end
+  return table.concat(parts, "; ")
+end
+
+
+local function discoverMeInterfaces()
+  local configuredOutput = tryProxy(CFG.outputMeInterfaceAddress)
+  local configuredInput = tryProxy(CFG.inputMeInterfaceAddress)
+
+  if configuredOutput and configuredInput then
+    return configuredOutput, configuredInput
+  end
+
+  log(
+    "WARN",
+    "One or both saved ME interface UUIDs are not visible. " ..
+    "Trying automatic discovery."
+  )
+
+  local interfaces = listMeInterfaces()
+  if #interfaces == 0 then
+    fail("No me_interface components are visible to this OC computer.")
+  end
+
+  local inputEntry = nil
+  local outputEntry = nil
+
+  if configuredInput then
+    inputEntry = {
+      address = CFG.inputMeInterfaceAddress,
+      proxy = configuredInput
+    }
+  else
+    local candidates = {}
+    for _, entry in ipairs(interfaces) do
+      if (entry.cpuCount or 0) > 0 and
+         entry.address ~= CFG.outputMeInterfaceAddress then
+        candidates[#candidates + 1] = entry
+      end
+    end
+
+    if #candidates == 1 then
+      inputEntry = candidates[1]
+    end
+  end
+
+  if configuredOutput then
+    outputEntry = {
+      address = CFG.outputMeInterfaceAddress,
+      proxy = configuredOutput
+    }
+  else
+    local candidates = {}
+    for _, entry in ipairs(interfaces) do
+      local isInput =
+        inputEntry and entry.address == inputEntry.address
+
+      if not isInput and (entry.cpuCount or 0) == 0 then
+        candidates[#candidates + 1] = entry
+      end
+    end
+
+    if #candidates == 1 then
+      outputEntry = candidates[1]
+    end
+  end
+
+  if not inputEntry or not outputEntry then
+    fail(
+      "Cannot uniquely identify INPUT/OUTPUT ME interfaces. Visible: " ..
+      describeMeInterfaces(interfaces)
+    )
+  end
+
+  CFG.inputMeInterfaceAddress = inputEntry.address
+  CFG.outputMeInterfaceAddress = outputEntry.address
+
+  log("INFO", "Auto-detected INPUT ME Interface: " .. inputEntry.address)
+  log("INFO", "Auto-detected OUTPUT ME Interface: " .. outputEntry.address)
+
+  return outputEntry.proxy, inputEntry.proxy
+end
+
+
+local function discoverTransposer()
+  local configured = tryProxy(CFG.transposerAddress)
+  if configured then return configured end
+
+  log(
+    "WARN",
+    "Saved Transposer UUID is not visible. Trying automatic discovery."
+  )
+
+  local candidates = {}
+
+  for address in component.list("transposer", true) do
+    local proxy = tryProxy(address)
+    if proxy then
+      local okDrive, driveSize =
+        pcall(proxy.getInventorySize, CFG.meDriveSide)
+      local okIo, ioSize =
+        pcall(proxy.getInventorySize, CFG.meIoPortSide)
+
+      if okDrive and okIo and
+         driveSize == 10 and ioSize == 12 then
+        candidates[#candidates + 1] = {
+          address = address,
+          proxy = proxy
+        }
+      end
+    end
+  end
+
+  if #candidates ~= 1 then
+    local addresses = {}
+    for _, entry in ipairs(candidates) do
+      addresses[#addresses + 1] = entry.address
+    end
+
+    fail(
+      "Cannot uniquely identify Transposer by ME Drive(10) + " ..
+      "ME IO Port(12). Candidates: " ..
+      (#addresses > 0 and table.concat(addresses, ", ") or "none")
+    )
+  end
+
+  CFG.transposerAddress = candidates[1].address
+  log("INFO", "Auto-detected Transposer: " .. CFG.transposerAddress)
+  return candidates[1].proxy
 end
 
 
@@ -871,10 +1032,9 @@ local function runChallenge(outputs, count)
 end
 
 
-local function validateSetup()
-  outputMe = requiredProxy(CFG.outputMeInterfaceAddress, "Output ME Dual Interface")
-  inputMe = requiredProxy(CFG.inputMeInterfaceAddress, "Input ME Dual Interface")
-  transposer = requiredProxy(CFG.transposerAddress, "Transposer")
+local function validateSetup(checkOnly)
+  outputMe, inputMe = discoverMeInterfaces()
+  transposer = discoverTransposer()
   database = discoverDatabase()
 
 
@@ -901,11 +1061,19 @@ local function validateSetup()
 
   local targetCpu = findTargetCpu()
   if not targetCpu then
-    fail("Dedicated AE crafting CPU '" .. CFG.cpuName .. "' was not found. Rename any block in one Crafting CPU multiblock to exactly " .. CFG.cpuName .. " using an Anvil or Inscriber, then rebuild/let the CPU reform.")
+    local message =
+      "Dedicated AE crafting CPU '" .. CFG.cpuName ..
+      "' was not found. The safe check can continue, but production " ..
+      "will not start until one CPU has this exact AE name."
+
+    if checkOnly then
+      log("WARN", message)
+    else
+      fail(message)
+    end
+  else
+    log("INFO", "Dedicated AE CPU found: " .. CFG.cpuName)
   end
-
-
-  log("INFO", "Dedicated AE CPU found: " .. CFG.cpuName)
   log("INFO", "Components validated.")
   log("INFO", "AE crafting CPUs visible: " .. cpuCount)
   log("INFO", "Crafting Monitor blocks are NOT required by this custom controller.")
@@ -914,7 +1082,7 @@ end
 
 local function initialize()
   loadState()
-  validateSetup()
+  validateSetup(false)
 
 
   recoverIoFlush()
@@ -1015,7 +1183,7 @@ end
 
 local function runCheckOnly()
   loadState()
-  validateSetup()
+  validateSetup(true)
 
 
   local stock = getTargetStock()
