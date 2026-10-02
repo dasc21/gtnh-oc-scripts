@@ -816,7 +816,6 @@ local function getTargetStock()
 
 
   fluids = nil
-  collectgarbage("collect")
   return amount
 end
 
