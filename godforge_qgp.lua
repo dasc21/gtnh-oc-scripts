@@ -27,6 +27,7 @@
 local component = require("component")
 local computer = require("computer")
 local serialization = require("serialization")
+local cliArgs = {...}
 
 
 local CFG = {
@@ -1246,7 +1247,7 @@ end
 
 
 local ok, err = xpcall(function()
-  if arg and (arg[1] == "check" or arg[1] == "--check") then
+  if cliArgs[1] == "check" or cliArgs[1] == "--check" then
     runCheckOnly()
   else
     initialize()
