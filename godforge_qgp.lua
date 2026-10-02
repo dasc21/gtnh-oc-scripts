@@ -27,7 +27,7 @@
 local component = require("component")
 local computer = require("computer")
 local serialization = require("serialization")
-local cliArgs = {...}
+local filesystem = require("filesystem")
 
 
 local CFG = {
@@ -1247,11 +1247,19 @@ end
 
 
 local ok, err = xpcall(function()
-  if cliArgs[1] == "check" or cliArgs[1] == "--check" then
-    runCheckOnly()
-  else
+  -- Safety interlock:
+  -- By default this program only performs the non-destructive check.
+  -- Production is armed only by explicitly creating:
+  --   /home/godforge_qgp.enable
+  --
+  -- This avoids relying on OpenOS /bin/lua.lua forwarding CLI arguments,
+  -- which differs between the OpenComputers environments used by GTNH.
+  if filesystem.exists("/home/godforge_qgp.enable") then
+    log("WARN", "Production enable file detected: /home/godforge_qgp.enable")
     initialize()
     loop()
+  else
+    runCheckOnly()
   end
 end, debug.traceback)
 
