@@ -1,0 +1,176 @@
+diff --git a/src/main/java/com/science/gtnl/common/machine/multiMachineBase/WirelessEnergyMultiMachineBase.java b/src/main/java/com/science/gtnl/common/machine/multiMachineBase/WirelessEnergyMultiMachineBase.java
+index 1f478e7..patched 100644
+--- a/src/main/java/com/science/gtnl/common/machine/multiMachineBase/WirelessEnergyMultiMachineBase.java
++++ b/src/main/java/com/science/gtnl/common/machine/multiMachineBase/WirelessEnergyMultiMachineBase.java
+@@
+ import net.minecraft.util.EnumChatFormatting;
+ import net.minecraft.util.StatCollector;
+ import net.minecraft.world.World;
++import net.minecraftforge.fluids.FluidStack;
+@@
+ public abstract class WirelessEnergyMultiMachineBase<T extends WirelessEnergyMultiMachineBase<T>>
+     extends MultiMachineBase<T> implements IWirelessEnergy {
++
++    private static final int WAILA_OUTPUT_LIMIT = 3;
+@@
+     @Override
+     public void getWailaNBTData(EntityPlayerMP player, TileEntity tile, NBTTagCompound tag, World world, int x, int y,
+         int z) {
+-        super.getWailaNBTData(player, tile, tag, world, x, y, z);
++        // GT's multiblock Waila code serializes every entry in mOutputItems/mOutputFluids even though
++        // the tooltip only renders the first three outputs. Wireless mode can accumulate thousands of
++        // duplicate entries, which makes merely looking at the controller extremely expensive.
++        // Temporarily expose only the first few entries to Waila, then restore the real arrays.
++        ItemStack[] fullOutputItems = mOutputItems;
++        FluidStack[] fullOutputFluids = mOutputFluids;
++        int fullItemCount = countNonNull(fullOutputItems);
++        int fullFluidCount = countNonNull(fullOutputFluids);
++        boolean trimWailaOutputs = wirelessMode
++            && (fullItemCount > WAILA_OUTPUT_LIMIT || fullFluidCount > WAILA_OUTPUT_LIMIT);
++
++        if (trimWailaOutputs) {
++            mOutputItems = firstNonNull(fullOutputItems, WAILA_OUTPUT_LIMIT);
++            mOutputFluids = firstNonNull(fullOutputFluids, WAILA_OUTPUT_LIMIT);
++        }
++
++        try {
++            super.getWailaNBTData(player, tile, tag, world, x, y, z);
++        } finally {
++            if (trimWailaOutputs) {
++                mOutputItems = fullOutputItems;
++                mOutputFluids = fullOutputFluids;
++            }
++        }
++
++        // Keep the real output counts so GT's existing "and N more" line remains meaningful.
++        if (trimWailaOutputs) {
++            if (fullItemCount > 0) tag.setInteger("outputItemLength", fullItemCount);
++            if (fullFluidCount > 0) tag.setInteger("outputFluidLength", fullFluidCount);
++        }
++
+         final IGregTechTileEntity tileEntity = getBaseMetaTileEntity();
+         if (tileEntity != null) {
+             tag.setBoolean("wirelessUpgrade", wirelessUpgrade);
+@@
+-        mOutputItems = Utils.mergeArray(mOutputItems, processingLogic.getOutputItems());
+-        mOutputFluids = Utils.mergeArray(mOutputFluids, processingLogic.getOutputFluids());
++        // Do not append one output entry per internally processed recipe. In wireless mode a single
++        // machine check can execute up to 100k cycles; blindly concatenating arrays makes both recipe
++        // processing and Waila scale with the total number of cycles instead of the number of unique outputs.
++        mOutputItems = mergeWirelessItemOutputs(mOutputItems, processingLogic.getOutputItems());
++        mOutputFluids = mergeWirelessFluidOutputs(mOutputFluids, processingLogic.getOutputFluids());
+         totalOverclockedDuration += processingLogic.getDuration();
+         maxParallelStored = maxParallelStored - processingLogic.getCurrentParallels();
+@@
+         endRecipeProcessing();
+         return result;
+     }
++
++    private static ItemStack[] mergeWirelessItemOutputs(ItemStack[] current, ItemStack[] incoming) {
++        List<ItemStack> merged = new ArrayList<>();
++        appendItemOutputs(merged, current);
++        appendItemOutputs(merged, incoming);
++        return merged.isEmpty() ? null : merged.toArray(new ItemStack[0]);
++    }
++
++    private static void appendItemOutputs(List<ItemStack> merged, ItemStack[] source) {
++        if (source == null) return;
++
++        for (ItemStack stack : source) {
++            if (stack == null || stack.stackSize <= 0) continue;
++
++            long remaining = stack.stackSize;
++            for (ItemStack existing : merged) {
++                if (!GTUtility.areStacksEqual(existing, stack)) continue;
++
++                long room = (long) Integer.MAX_VALUE - existing.stackSize;
++                if (room <= 0) continue;
++
++                int moved = (int) Math.min(room, remaining);
++                existing.stackSize += moved;
++                remaining -= moved;
++                if (remaining == 0) break;
++            }
++
++            while (remaining > 0) {
++                ItemStack copy = stack.copy();
++                copy.stackSize = (int) Math.min(Integer.MAX_VALUE, remaining);
++                merged.add(copy);
++                remaining -= copy.stackSize;
++            }
++        }
++    }
++
++    private static FluidStack[] mergeWirelessFluidOutputs(FluidStack[] current, FluidStack[] incoming) {
++        List<FluidStack> merged = new ArrayList<>();
++        appendFluidOutputs(merged, current);
++        appendFluidOutputs(merged, incoming);
++        return merged.isEmpty() ? null : merged.toArray(new FluidStack[0]);
++    }
++
++    private static void appendFluidOutputs(List<FluidStack> merged, FluidStack[] source) {
++        if (source == null) return;
++
++        for (FluidStack stack : source) {
++            if (stack == null || stack.amount <= 0) continue;
++
++            long remaining = stack.amount;
++            for (FluidStack existing : merged) {
++                if (!GTUtility.areFluidsEqual(existing, stack)) continue;
++
++                long room = (long) Integer.MAX_VALUE - existing.amount;
++                if (room <= 0) continue;
++
++                int moved = (int) Math.min(room, remaining);
++                existing.amount += moved;
++                remaining -= moved;
++                if (remaining == 0) break;
++            }
++
++            while (remaining > 0) {
++                FluidStack copy = stack.copy();
++                copy.amount = (int) Math.min(Integer.MAX_VALUE, remaining);
++                merged.add(copy);
++                remaining -= copy.amount;
++            }
++        }
++    }
++
++    private static int countNonNull(ItemStack[] stacks) {
++        if (stacks == null) return 0;
++        int count = 0;
++        for (ItemStack stack : stacks) if (stack != null) count++;
++        return count;
++    }
++
++    private static int countNonNull(FluidStack[] stacks) {
++        if (stacks == null) return 0;
++        int count = 0;
++        for (FluidStack stack : stacks) if (stack != null) count++;
++        return count;
++    }
++
++    private static ItemStack[] firstNonNull(ItemStack[] stacks, int limit) {
++        if (stacks == null || limit <= 0) return null;
++        List<ItemStack> result = new ArrayList<>(Math.min(stacks.length, limit));
++        for (ItemStack stack : stacks) {
++            if (stack == null) continue;
++            result.add(stack);
++            if (result.size() >= limit) break;
++        }
++        return result.isEmpty() ? null : result.toArray(new ItemStack[0]);
++    }
++
++    private static FluidStack[] firstNonNull(FluidStack[] stacks, int limit) {
++        if (stacks == null || limit <= 0) return null;
++        List<FluidStack> result = new ArrayList<>(Math.min(stacks.length, limit));
++        for (FluidStack stack : stacks) {
++            if (stack == null) continue;
++            result.add(stack);
++            if (result.size() >= limit) break;
++        }
++        return result.isEmpty() ? null : result.toArray(new FluidStack[0]);
++    }
+ 
+     @Override
+     public void setupProcessingLogic(ProcessingLogic logic) {
