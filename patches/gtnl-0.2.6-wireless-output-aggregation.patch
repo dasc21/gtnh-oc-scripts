@@ -1,5 +1,4 @@
 diff --git a/src/main/java/com/science/gtnl/common/machine/multiMachineBase/WirelessEnergyMultiMachineBase.java b/src/main/java/com/science/gtnl/common/machine/multiMachineBase/WirelessEnergyMultiMachineBase.java
-index 1f478e7..patched 100644
 --- a/src/main/java/com/science/gtnl/common/machine/multiMachineBase/WirelessEnergyMultiMachineBase.java
 +++ b/src/main/java/com/science/gtnl/common/machine/multiMachineBase/WirelessEnergyMultiMachineBase.java
 @@
